@@ -1,0 +1,595 @@
+---
+title: "Forecasting - Assignment 2"
+author: "Nisa Rachmatika (s3570512)"
+
+
+output:
+  html_document: default
+  pdf_document: default
+
+---
+```{r, message=FALSE, warning=FALSE, include=FALSE}
+```
+<br>
+```{r,echo=FALSE, include = FALSE}
+MASE.dynlm <- function(model, ... ){
+    
+    options(warn=-1)
+    
+    if(!missing(...)) {# Several models
+      models = list(model, ...)
+      m = length(models)
+      for (j in 1:m){
+        if ((class(models[[j]])[1] == "polyDlm") | (class(models[[j]])[1] == "dlm") | (class(models[[j]])[1] == "koyckDlm") | (class(models[[j]])[1] == "ardlDlm")){
+          Y.t = models[[j]]$model$model$y.t
+          fitted = models[[j]]$model$fitted.values
+        } else if (class(models[[j]])[1] == "lm"){
+          Y.t = models[[j]]$model[,1]
+          fitted = models[[j]]$fitted.values
+        } else if (class(models[[j]])[1] == "dynlm"){
+            Y.t = models[[j]]$model$Y.t
+            fitted = models[[j]]$fitted.values  
+        } else {
+          stop("MASE function works for lm, dlm, polyDlm, koyckDlm, and ardlDlm objects. Please make sure that you are sending model object directly or send a bunch of these objects to the function.")
+        }
+        # Y.t = models[[j]]$model$y.t
+        # fitted = models[[j]]$fitted.values
+        n = length(fitted)
+        e.t = Y.t - fitted
+        sum = 0 
+        for (i in 2:n){
+          sum = sum + abs(Y.t[i] - Y.t[i-1] )
+        }
+        q.t = e.t / (sum/(n-1))
+        if (j == 1){
+          MASE = data.frame( n = n , MASE = mean(abs(q.t)))
+          colnames(MASE) = c("n" , "MASE")
+        } else {
+          MASE = rbind(MASE, c(n , mean(abs(q.t))))
+        }
+      }
+      Call <- match.call()
+      row.names(MASE) = as.character(Call[-1L])
+      MASE
+    } else { # Only one model
+      if ((class(model)[1] == "polyDlm") | (class(model)[1] == "dlm") | (class(model)[1] == "koyckDlm") | (class(model)[1] == "ardlDlm")){
+        Y.t = model$model$model$y.t
+        fitted = model$model$fitted.values
+      } else if (class(model)[1] == "lm"){
+        Y.t = model$model[,1]
+        fitted = model$fitted.values
+      } else if (class(model)[1] == "dynlm"){
+        Y.t = model$model$Y.t
+        fitted = model$fitted.values  
+      } else {
+        stop("MASE function works for lm, dlm, polyDlm, koyckDlm, and ardlDlm objects. Please make sure that you are sending model object directly or send one of these objects to the function.")
+      }
+      n = length(fitted)
+      e.t = Y.t - fitted
+      sum = 0 
+      for (i in 2:n){
+        sum = sum + abs(Y.t[i] - Y.t[i-1] )
+      }
+      q.t = e.t / (sum/(n-1))
+      MASE = data.frame( MASE = mean(abs(q.t)))
+      colnames(MASE) = c("MASE")
+      Call <- match.call()
+      row.names(MASE) = as.character(Call[-1L])
+      MASE
+    }
+    
+}
+```
+
+## Part I - Introduction
+
+This report is written based on two datasets: first, dataset about amount of horizontal solar radiation reaching the ground at a particular location over the globe between January 1960 and December 2014. Second, quarterly Residential Property Price Index (PPI) in Melbourne and quarterly population change over previous quarter in Victoria between September 2003 and December 2016.
+
+With forecasting method, this report tried to answer two objectives:
+
+**First**, to give best 2 years ahead forecasts in terms of MASE for the solar radiation series by using the time series regression methods (distributed lag models (dLagM package)), dynamic linear models (dynlm package), and exponential smoothing and corresponding state space model.
+
+**Second**, to analyze correlation between Residential PPI in Melbourne and population change in Victoria: whether whether the correlation between these two series is spurious or not.
+
+## Part II - Discussions and Results
+###Task 1
+#### Time Series Plot Exploration
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r include=FALSE}
+library(TSA)
+library(captioner)
+library(dynlm)
+library(ggplot2)
+library(AER)
+library(Hmisc)
+library(forecast)
+library(dLagM)
+library(x13binary)
+library(readr)
+library(expsmooth)
+library(x12)
+#library(dplyr)
+library(readr)
+library(captioner)
+fig_nums <- captioner()
+```
+The data is being converted to time series object first. 
+```{r message=FALSE}
+solars<-read_csv("data1.csv") 
+s<- ts(solars$solar,start = c(1960,1),frequency = 12) 
+ppt = ts(solars$ppt,start = c(1960,1),frequency = 12)
+
+solarppt = ts(solars[,1:2],start = c(1960,1),frequency = 12)
+plot(solarppt, ylab="Solar Radiation", xlab = "Year", main = "Time series plot of solar radiation and precipitation series", type="l", yax.flip=T)
+```
+
+             `r fig_nums("1"," Solar Radiation & Precipitation Series")`
+
+There are no obvious trend visible in both solar radiation and precipitation series, since the series are bouncing around mean level. Also, the intervention is not clearly visible. However, the seasonal pattern and changing variance is appear.   
+Now the correlation of both series will be examined.
+```{r}
+cor(solarppt)
+```
+Solar radiation and precipitation data is negatively correlated, means as precipitation value decreases, solar radiation value will also decreases. However, this correlation is only moderate. 
+
+The next steps is modelling using Distributed Lag Models (DLM), dynamic linear
+models, and exponential smoothing and corresponding state space models.
+<br>
+
+####1. Distributed Lag Models (DLM) 
+#####1.a. Normal Distributed Lag Models 
+The first thing needs to be determined in normal DLM modelling is to specify number of lags. Here, because the correlation is moderate, we will start with moderate number of lags. 
+We can also choose the appropriate lag by observing the goodness of fit in  Adjusted R-squared value below:
+```{r}
+ppt<-as.vector(ppt)
+solar<-as.vector(s)
+for (i in 2:12){
+  lags<-finiteDLMauto(ppt, solar, q.min = 1, q.max = i, 
+                   model.type = c("dlm"), error.type = c("AIC"), trace = TRUE)
+}
+lags
+
+```
+Here we can see that from the lag 1, adjusted R-squared values keep increasing, means the model keep fitting the data better.However, after lag 5, the increase rate becomes slower. Hence, we chose lag 5 as starting point.
+
+DLM model with 5 lags
+```{r}
+m1 = dlm(x = as.vector(ppt) , y = as.vector(solar), q = 5 , show.summary = TRUE)
+```
+Here, even though p-value indicates the model is significant, most of the coefficient values are insignificants. Also, the adjusted R-squared is very low. Hence, the model result is assumed not that good, and we can check the residuals to prove this assumption.
+```{r}
+checkresiduals(m1$model)
+```
+
+                  `r fig_nums("2","Residuals Plot of Model 1")`
+
+As assumed before, this model have significant residuals, confirmed by BG-test result. From the residual plots, there are visible trend and changing variance, also there are significant correlations in ACF plots. The histogram also not normally distributed. 
+
+All of the test indicates the model is not good enough in fitting the data. Hence, we will try another lag numbers. Here I proposed to decrease and increase 1 step of the lag. 
+```{r}
+m2 = dlm(x = as.vector(ppt) , y = as.vector(solar), q = 4 , show.summary = TRUE)
+m3 = dlm(x = as.vector(ppt) , y = as.vector(solar), q = 6 , show.summary = TRUE)
+```
+Similar with the first model above, even though p-value indicates model2 and model3 are significants, most of the coefficient values are insignificants. However, even though the adjusted R-squared is still low, the value is slightly increase in model3, with lag 6. Because the test result is similar with model1, here we assumed that the residual results will not have a big difference also.
+```{r}
+checkresiduals(m2$model)
+checkresiduals(m3$model)
+```
+             `r fig_nums("3", "Residuals Plot of Model 2 and 3")`
+
+As predicted, these models have significant residuals, confirmed by BG-test results. Also, the trend and changing variance is still visible, and there are significant correlations in ACF plots. Furthermore, the histogram is still not normally distributed. 
+
+Now we will check multicollinearity of these 3 models:
+```{r}
+vif(m1$model)
+vif(m2$model)
+vif(m3$model)
+```
+Interestingly, all of the models show that all of the value is under 10, means the effect of multicollinearity is low.
+Because all of 3 models seems gives almost similar performance, we will pick the best model from these DLM approaches based on their AIC, BIC and MASE values. 
+```{r}
+aic.models = AIC(m1$model, m2$model, m3$model)
+sortScore(aic.models, score="aic")
+bic.models = BIC(m1$model, m2$model, m3$model)
+sortScore(bic.models, score="bic")
+MASE(m1,m2,m3)
+```
+All of these 3 tests gives same conclussions, that m3 is the best model with the lowest AIC, BIC, and MASE
+Hence, in DLM approach, lag 6 seems will be a better fit.
+
+#####1.b. Polynomial Distributed Lags 
+Even though DLMs models above indicates the effect of multicollinearity is low, we still will try using Polynomial Distributed Lags to see whether the effect of multicollinearity can be reduced.
+First, we will apply second order polynomial with lag order determined below:
+```{r}
+for (i in 2:12){
+poly<-finiteDLMauto(ppt, solar, q.min = 1, q.max = i,k.order = 2, 
+model.type = c("poly"), error.type = c("AIC"), trace = TRUE)
+}
+poly
+```
+As explained in the previous step, the Adjusted R-Squared values are increasing slowly at lag 6. Hence, I will chose 2nd order polynomial with lag 6 as a starter.
+```{r}
+m4 = polyDlm(x=ppt, y=solar, q=6, k=2, show.beta = TRUE , show.summary = TRUE)
+```
+By putting second order polynomial, all of beta coefficients are significants, also p-value is significant. However, the adjusted R-squared value is still small, and it's even smaller than model3 in DLM approach. 
+
+Now we are gonna check the residuals, VIF, and MASE of this model. 
+```{r}
+checkresiduals(m4$model)
+vif(m4$model)
+MASE(m4$model)
+```
+
+                    `r fig_nums("4","Residuals plot of Model 4")`
+
+BG-test indicates significant residuals result. The inference is still not further from the last 3 models: the trend and changing variance is visible, and the histogram is not normally distributed. However, all of the VIF value is higher than 10, and MASE is higher than the best model in DLM model before. Hence, this polynomial model is not good enough to beat the best model in DLM approach before.
+Here, I did not increase the polynomial order to avoid overfitting. Also, I did not change the lag order since last DLM approach indicates model with lag 6 is performs best. 
+
+Hence, I only fit 1 model for polynomial distributed lags approach, with no better result than DLM approach. Therefore, m3 is the best fit model this far.
+
+#####1.c. Koyck Transformation
+Because so far the DLM approach perform better, we will make this approach better by using Koyck transformation to deal with the nature of DLM (that nonlinear in terms of its parameters).
+```{r}
+m5 = koyckDlm(x = ppt , y = solar , show.summary = TRUE)
+```
+Here, all of the coefficients are significant, and we have significant p-value also. The adjusted R-squared also increase significantly. The original parameter values are beta=5.35 and phi=0.98. So the weights will decline quickly at the rate of 0.98. 
+
+Now we are gonna check the residuals, VIF, and MASE value
+```{r}
+checkresiduals(m5$model)
+bgtest(m5$model)
+vif(m5$model)
+MASE(m5)
+```
+
+               `r fig_nums("5","Residuals plot of Model 5")`
+
+The BG-test still indicates significant residuals in this model. However, the trend and variance now are not clearly visible. The histogram also not rightly skewed as before, however there ase still some correlations in ACF plot. 
+
+VIF value is very low, indicates the multicollinearity effect is low. Also, the MASE value decrease significantly. 
+Hence, compared to the best model before ("m3" model from DLM approach), "m5" model with Koyck approach perform better as becomes the best fit so far.
+
+#####1.d. Autoregressive Distributed Lag Model
+As explained before, Koyck approach gives the best fit model so far, but it still suffer from significant residuals. Hence, another approach called Autoregressive DLM is being done. Here, we will experiment with ARDL model with p=q=1,2,3.
+```{r}
+m6 = ardlDlm(x = ppt, y = solar, p = 1 , q = 1 , show.summary = TRUE)
+m7 = ardlDlm(x = ppt, y = solar, p = 1 , q = 2 , show.summary = TRUE)
+m8 = ardlDlm(x = ppt, y = solar, p = 1 , q = 3 , show.summary = TRUE)
+m9 = ardlDlm(x = ppt, y = solar, p = 2 , q = 1 , show.summary = TRUE)
+m10 = ardlDlm(x = ppt, y = solar, p = 2 , q = 2 , show.summary = TRUE)
+m11 = ardlDlm(x = ppt, y = solar, p = 2 , q = 3 , show.summary = TRUE)
+m12 = ardlDlm(x = ppt, y = solar, p = 3 , q = 1 , show.summary = TRUE)
+m13 = ardlDlm(x = ppt, y = solar, p = 3 , q = 2 , show.summary = TRUE)
+m14 = ardlDlm(x = ppt, y = solar, p = 3 , q = 3 , show.summary = TRUE)
+```
+All of the Autoregressive model gives a high adjusted R-squared value. However, "m11" (with p=2 and q=3) and "m14" (with p=3 and q=3)  gives the highest adjusted R-squared value. 
+Now we will check the MASE value of these models
+```{r}
+mase <- MASE(m6,m7,m8,m9,m10,m11,m12,m13,m14)
+mase
+```
+Here,"m14" gives the lowest MASE value (0.4737), lower than previous best model ("m5" with Koyck DLM approach) with MASE value of 1.03. 
+
+we will check the residuals and VIF value for this model.
+```{r}
+checkresiduals(m14$model)
+vif(m14$model)
+```
+
+               `r fig_nums("6","Residuals plot of Model 14")`
+
+Here, half of VIF value are under 10, and half of them are above 10. Hence, the multicollinerarity effect on this model is moderate. However, this model still have significant residuals, proven by BG-test and the residuals graph: significant correlation on ACF plot and changing variance in time series plot.
+
+Hence, we can conclude that all of the models still capture significant residuals. However, because model "m14" with Autoregressive DLM approach gives the lowest MASE amongst all of the models, the forecast for the next 2 years will be based on this model.
+Here, the forecast data is inserted manually from "data.x.csv" dataset, due to technical issue. 
+```{r}
+fc = ardlDlmForecast(model = m14, x = c(0.189009998,0.697262522,0.595213491,0.487388526,0.261677017,0.808606651,0.94186202
+,0.905636325,1.059964682,0.341438784,0.525805322,0.602471062,0.109860632,0.781464707
+,0.69685501,0.502413906,0.649385609,0.745960773,0.663047123,0.533770112,0.61542621
+,0.54606508,0.142673325,0.013650407), h=24)$forecast 
+fc
+```
+```{r}
+{plot(s, type="o", xaxt="n",xlim=c(1970,2035),ylim=c(0,100),  ylab = "Solar Radiation", xlab = "Time", main="Solar Radiation Forecast")
+lines(ts(fc, start = 2015),col="Red",type="o")}
+```
+
+             `r fig_nums("7"," Solar Radiation Forecast 1970-1935")`
+
+####2. Dynamic Linear Models  
+In previous DLM models, all of the models have significant residuals, means they cannot capture all the trends, correlations, and seasonal pattern in the data. 
+In this part, Dynamic Linear Models is used to capture all of those components. 
+There are two events that can be skeptically looked as an intervension. However, the changing in mean level most obvious in year 1965, that happened for a whole year. Because the intervention is not immediate, also the shift in the mean level is not permanent, I propose to use pulse function for this intervention. Also, even though the trend is not clearly visible in solar radiation time series plot, we will include all of the component with lag 1 at the beginning. 
+```{r}
+#Here, Y.t is treated as log of solar radiation series.
+Y.ta = log(s) 
+X.t=ppt
+T=59
+P.t=1*(seq(s)==T)
+P.t.1=Lag(P.t,+1)
+```
+
+```{r}
+ma<- dynlm(Y.ta ~ X.t+ L(Y.ta , k = 1 ) + P.t.1 + P.t +trend(Y.ta) + season(Y.ta))
+summary(ma)
+```
+Here we get hight adjusted R-squared value (0.9036), however this need to be treated skeptically since this high value means the model can be overfit.
+We will see the residuals to see if the model can capture all seasonal and trend components.
+```{r}
+checkresiduals(ma)
+```
+
+               `r fig_nums("8","Residuals plot of Model ma")`
+
+The histogram indicates the series is normally distributed, however, there are visible changing variance in time series plot, also 1 significant lag in ACF plot. Also, BG-test stated this residuals is significant. Hence, we need to take a look at another model to get a better residual result.
+
+Interestingly, in this model, even though the trend is expected to be not significant (because there is no visible trend in the plot), all of pulse step also not significant. Next, we will take out the trend but not the pulse, to see if the model behave better. Here, the new model is build with second lag.  
+
+```{r}
+mb<- dynlm(Y.ta ~ X.t+ L(Y.ta , k = 2) + P.t.1 + P.t + season(Y.ta))
+summary(mb)
+```
+With second lag of Y.t, the adjusted R-square (0.8443) becomes lower. Now we will see the residuals.
+```{r}
+checkresiduals(mb)
+```
+
+               `r fig_nums("9","Residuals plot of Model mb")`
+
+After putting the second lag, the residuals is getting worse. The changing variance in time series plot and autocorrelation in ACF plot become more and more. Also, BG-test stated this residuals is still significant. Hence, another model is proposed by combining the first and second lag together.
+```{r}
+mc<- dynlm(Y.ta ~ X.t+ L(Y.ta, k = 1) + P.t.1 + P.t + L(Y.ta , k = 2)+season(Y.ta))
+summary(mc)
+```
+Interestingly, by combining first and second lag, now X.t becomes significant. Adjusted R-squared value also becomes higher than previous model. Now we will check the residuals.
+```{r}
+checkresiduals(mc)
+```
+
+               `r fig_nums("10","Residuals plot of Model mc")`
+
+However, the residuals still significant in this model, also changing variance and one significant lag at lag 12 is appear. 
+It looks like the pulse coefficients are still not significant so far, and the model is not have much progress, since the residuals is still significants. 
+Hence, I propose to take out the pulse coefficients and not take a log in solar radiation. 
+```{r}
+Y.t=s
+X.t=ppt
+```
+
+```{r}
+m16 = dynlm(Y.t ~ X.t+ L(Y.t , k = 1 ) + season(Y.t))
+summary(m16)
+```
+Here, X.t becomes insignificant again, however another coefficients are significants. The adjusted R-squared value is also still high.
+```{r}
+checkresiduals(m16)
+```
+
+               `r fig_nums("11","Residuals plot of Model 16")`
+
+The residuals of this model is similar with previous models: the residuals are still significant, with changing variance in time series plot, and autocorrelation getting worse in ACF plot. Hence, we will fit another model with lag 2.
+```{r}
+m17 = dynlm(Y.t ~ X.t+ L(Y.t , k = 2 ) + season(Y.t))
+summary(m17)
+```
+
+               `r fig_nums("12","Residuals plot of Model 17")`
+
+Now the p-value is reduced. The residuals check is below:
+```{r}
+checkresiduals(m17)
+```
+The similar inference of this model is still happened: the residuals still have changing variance in time series plot, and autocorrelation in ACF plot. Hence, we will fit another model combining lag 1 and lag 2.
+```{r}
+m18 = dynlm(Y.t ~ X.t+ L(Y.t , k = 1 ) + L(Y.t , k = 2 ) + season(Y.t))
+summary(m18)
+```
+Now the adjusted R-values are higher again, but we need to check the residuals to see this model's performance.
+```{r}
+checkresiduals(m18)
+```
+
+              `r fig_nums("13","Residuals plot of Model 18")`
+
+The inference is still similar with previous models. However, by adding both lags, the autocorrelation in ACF is reduced. Hence, we will add another lag to see if the model performs better.
+```{r}
+m19=dynlm(Y.t ~ X.t + L(Y.t , k = 1 ) + L(Y.t , k = 2 )+ L(Y.t , k = 3 )+season(Y.t))
+summary(m19)
+```
+Here the adjusted R-value is keep increasing, however, the number of insignificant coefficients also increase. Now we will check the residuals:
+```{r}
+checkresiduals(m19)
+```
+
+              `r fig_nums("14","Residuals plot of Model 19")`
+
+Here, eventhough the changing variance still visible, the number of correlation in ACF plot keeps reducing.
+Now, we will add independent (X.t) variable, and see if we can make the model better.
+```{r}
+m20=dynlm(Y.t ~ X.t + L(X.t , k = 1 ) + L(Y.t , k = 1 ) + L(Y.t , k = 2 )+ L(Y.t , k = 3 )+season(Y.t))
+summary(m20)
+```
+Again, the number of significant correlations is keep decreasing. Now we will see the residuals:
+```{r}
+checkresiduals(m20)
+```
+
+              `r fig_nums("15","Residuals plot of Model 20")`
+
+Here even though the residuals still significant, but the number of autocorrelation in ACF plot is keep decreasing. Now we will try to use lag 2 in X variable to find a better result.
+```{r}
+m21=dynlm(Y.t ~ X.t + L(X.t , k = 2 ) + L(Y.t , k = 1 ) + L(Y.t , k = 2 )+ L(Y.t , k = 3 )+season(Y.t))
+summary(m20)
+checkresiduals(m21)
+```
+
+              `r fig_nums("16","Residuals plot of Model 21")`
+
+Here the number of autocorrelation in ACF plot keeps decreasing. Hence, we will add first and second lag in X variable.
+```{r}
+m22=dynlm(Y.t ~ X.t + L(X.t , k = 1 )+ L(X.t , k = 2 ) + L(Y.t , k = 1 ) + L(Y.t , k = 2 )+ L(Y.t , k = 3 )+season(Y.t))
+summary(m22)
+checkresiduals(m22)
+```
+
+              `r fig_nums("17","Residuals plot of Model 22")`
+
+The model perform better in term of residuals (and the p-value keep getting higher), hence I propose to add another lag in X variable.
+```{r}
+m23=dynlm(Y.t ~ X.t + L(X.t , k = 1 )+ L(X.t , k = 2 )+ L(X.t , k = 3) + L(Y.t , k = 1 ) + L(Y.t , k = 2 )+ L(Y.t , k = 3 )+season(Y.t))
+summary(m23)
+checkresiduals(m23)
+```
+
+              `r fig_nums("18","Residuals plot of Model 23")`
+
+Since the residuals result getting better, and autocolleration in ACF plot getting fewer, another lag in dependent variable is added.
+```{r}
+m24=dynlm(Y.t ~ X.t+L(X.t , k = 1 )+ L(X.t , k = 2 )+ L(X.t , k = 3) + L(Y.t , k = 1 ) + L(Y.t , k = 2 )+ L(Y.t , k = 3 )+L(Y.t , k = 4)+season(Y.t))
+summary(m24)
+checkresiduals(m24)
+```
+
+               `r fig_nums("19","Residuals plot of Model 24")`
+
+Now finally BG-test result indicates the residuals in not significant, even though there is still some correlation and changing variance. Hence, we can conclude that "m24" model, with the third lag in X variable and fourth lag in Y variable is the best fit for Dynamic Linear Model approach in terms of residuals. 
+
+Next we will see whether VIF test confirm this result.
+```{r}
+MASE.dynlm(ma,mb,mc,m16,m17,m18,m19,m20,m21,m22,m23,m24)
+```
+
+As expected, "m24" has the lowest MASE. Hence, this model is chosen as the best fit fot Dynamic Linear Model approach. Now, we will forecast the model.
+```{r}
+
+Y.t=s
+q = 24
+n = nrow(m24$model)
+s.rad = array(NA , (n + q))
+X.t.1 = Lag(X.t,+1)
+X.t.2 = Lag(X.t,+2)
+X.t.3 = Lag(X.t,+3)
+s.rad[1:n] = Y.t[4:length(Y.t)]
+
+for (i in 1:q){
+  months = array(0,11)
+  months[(i-1)%%12] = 1
+  print(months)
+  data.new = c(1,X.t[n],X.t.1[n], X.t.2[n], X.t.3[n],s.rad[n-1+i],s.rad[n-2+i],s.rad[n-3+i],s.rad[n-4+i],months)
+  
+        s.rad[n+i] = as.vector(m24$coefficients) %*% data.new
+}
+result<-s.rad[(n+1):(n+q)]
+result
+```
+```{r}
+{plot(Y.t,xlim=c(1960,2016),main = "Time Series Plot of Forecasting using Dynamic Linear Model Approach")
+lines(ts(result,start=c(2015,1),frequency = 12),col="red")}
+```
+
+               `r fig_nums("20","Forecasting result of Model 24")`
+
+####3. Exponential Smoothing and State Space Model
+To explore the model further, we will fit different trend and seasonality patterns by only use solar radiation series.  
+First, we will examine the series, ACF, and PACF plots.
+```{r}
+plot(s, type="l", xlab= "Year", ylab=" Solar Radiation", main="Solar Radiation Time Series Plot")
+acf(s, main = "Sample ACF of Solar Radiation")
+pacf(s, main = "Sample ACF of Solar Radiation")
+```
+
+        `r fig_nums("21","Time Series, ACF, and PACF Plot of Solar Radiation")`
+
+The time series plot indicates seasonal pattern and changing variance, but no visible trends. It is confirmed by ACF and PACF plot, especialy the sample ACF plot that clearly show the seasonal part. 
+Based on this observation, we will just fit Holt-Winter's models to the series, since it is best for seasonal part. 
+```{r}
+m25<-hw(s,seasonal = "additive")
+summary(m25)
+m26<-hw(s,seasonal = "multiplicative")
+summary(m26)
+m27<-hw(s,seasonal = "additive", damped=TRUE)
+summary(m27)
+m28<-hw(s, seasonal = "multiplicative", exponential=TRUE)
+summary(m28)
+m29<-hw(s,seasonal = "multiplicative", damped=TRUE)
+summary(m29)
+```
+It turns out "m29" model with multiplicative seasonal and damped trend has the lowest MASE (0.2037). 
+
+Now we will take a look at state space model and see whether MASE score can be improved. Here we will set all the trends as none, since there are no obvious trend in the series. Hence, only 3 models can be fitted with state space model. 
+```{r}
+m30<-ets(s, model="ANA")
+summary(m30)
+m31<-ets(s, model="MNA")
+summary(m31)
+m32<-ets(s, model="MNM")
+summary(m32)
+
+models=c("ANA","MNA","MNM") 
+fit.AICc=array(NA,3)
+levels=array(NA, dim=c(3,1))
+expand=expand.grid(models)
+for (i in 1:3){
+  fit.AICc[i]=ets(s, model=toString(expand[i,1]))$aicc
+  levels[i,1]=toString(expand[i,1])
+}
+results=data.frame(levels,fit.AICc)
+colnames(results)=c("Model", "AICc")
+results
+```
+
+Here, all of the models agree that "m30" (Additive, None, Additive) state space model has the lowest MASE(0.2560) and AICc value (5459.505). However, the value is still lower than previous model ("m29" model with MASE value of 0.2037). Hence, model "m29" will be used for forecasting.
+```{r}
+{plot(m29, type="l", ylab="Solar Radiation", xlab="Year", 
+     fcol="red", plot.conf=FALSE)
+  lines(fitted(m29), col="blue")} 
+```
+
+`r fig_nums("22","Time Series Plot of Forecasting using Exponential Smoothing and State Space Model")`
+
+###Task 2
+Now we will examine whether there are spurious correlation between quarterly Residential Property Price Index (PPI) in Melbourne and quarterly population change over previous quarter in Victoria between September 2003 and December 2016. The time series plot is presented below:
+```{r}
+price.data<-read_csv("data2.csv")
+
+price = ts(price.data$price,start = c(2003,3),frequency = 4) 
+change = ts(price.data$change, start =c(2003,3),frequency = 4) 
+pricedata.ts = ts(price.data[,2:3],start = c(2003,3),frequency = 4)
+
+plot(pricedata.ts, xlab = "Year", main = "Time series plot of Property Price and Population Change in Victoria", type="l", yax.flip=T)
+```
+
+  `r fig_nums("23","Time Series Plot of property Price and Population Change in Victoria")`
+
+Here we can see upward trend for both series, shows the possibility of correlation between residential PPI and population change. It also proven by ccf plot below, that shows nearly all of the cross-correlations are significantly different from zero.
+```{r}
+ccf(as.vector(pricedata.ts[,1]), as.vector(pricedata.ts[,2]),ylab='CCF', main = "Sample CCF between Property Price and Population Change in Victoria")
+```
+
+      `r fig_nums("24","CCF Plot of roperty Price and Population Change in Victoria")`
+
+However, we will examine if this correlation is real or spurious, first by using CCF after first difference of both series.
+```{r}
+ccf(as.vector(diff(pricedata.ts[,1])), as.vector(diff(pricedata.ts[,2])),ylab='CCF', main = "Sample CCF after first difference between Property Price and Population Change in Victoria")
+```
+
+`r fig_nums("25","CCF Plot of Property Price and Population Change in Victoria after First Difference")`
+
+Now the autocorrelation is significantly reduced. From this plot, the assumption that the correlation is real becomes stronger. 
+However, to be able to clearly see the correlation, we will do prewhitening and see the sample CCF after prewhitening.
+```{r}
+
+
+price.white=ts.intersect(diff(diff(price,4)),diff(diff(log(change),4)))
+prewhitened = TSA::prewhiten(as.vector(price.white[,1]),as.vector(price.white[,2]),ylab='CCF', main="Sample CFF after prewhitening")
+```
+
+`r fig_nums("26","CCF Plot of Property Price and Population Change in Victoria after Pre-Whitening")`
+
+Here, after pre-whitening, the CCF plot becomes white noise. Means, all the correlations in the previous plot is false alarm, and quarterly Residential Property Price Index (PPI) in Melbourne and quarterly population change over previous quarter in Victoria between
+September 2003 and December 2016 is not correlated.
+
